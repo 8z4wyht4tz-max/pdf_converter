@@ -19,6 +19,8 @@
     },
 
     init() {
+      if (this._inited) return;
+      this._inited = true;
       pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
       UiController.bind(this.state, {
         onFiles: (files) => this.setFiles(files),
@@ -207,5 +209,12 @@
     }
   };
 
-  document.addEventListener('DOMContentLoaded', () => PdfConverter.App.init());
+  function boot() {
+    if (window.PdfConverter?.App) PdfConverter.App.init();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
 })(typeof window !== 'undefined' ? window : globalThis);

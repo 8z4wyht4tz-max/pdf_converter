@@ -117,12 +117,12 @@
     <section class="grid">
       <div class="card">
         <h2>1. Выберите PDF</h2>
-        <label class="drop" id="dropZone" for="fileInput">
+        <div class="drop" id="dropZone" role="button" tabindex="0" aria-label="Выбрать PDF-файлы">
           <div>
             <strong>Перетащите PDF сюда</strong>
             <small>или нажмите, чтобы выбрать один или несколько файлов</small>
           </div>
-        </label>
+        </div>
         <input id="fileInput" type="file" accept="application/pdf,.pdf" multiple />
         <div id="fileList" class="file-list"></div>
 
@@ -200,21 +200,1701 @@
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="js/utils.js"></script>
-  <script src="js/text-normalizer.js"></script>
-  <script src="js/table-builder.js"></script>
-  <script src="js/phrase-matcher.js"></script>
-  <script src="js/pdf-loader.js"></script>
-  <script src="js/pdf-renderer.js"></script>
-  <script src="js/image-preprocessor.js"></script>
-  <script src="js/ocr-engine.js"></script>
-  <script src="js/table-detector.js"></script>
-  <script src="js/table-merger.js"></script>
-  <script src="js/section-state-machine.js"></script>
-  <script src="js/error-logger.js"></script>
-  <script src="js/section-detector.js"></script>
-  <script src="js/excel-builder.js"></script>
-  <script src="js/ui-controller.js"></script>
-  <script src="js/app.js"></script>
+  <script>
+/* eslint-disable no-unused-vars */
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+
+  PdfConverter.Utils = {
+    median(arr) {
+      if (!arr.length) return 0;
+      const a = [...arr].sort((x, y) => x - y);
+      const m = Math.floor(a.length / 2);
+      return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+    },
+
+    levenshtein(a, b) {
+      const m = a.length;
+      const n = b.length;
+      let prev = Array(n + 1).fill(0).map((_, i) => i);
+      let cur = Array(n + 1);
+      for (let i = 1; i <= m; i++) {
+        cur[0] = i;
+        for (let j = 1; j <= n; j++) {
+          cur[j] = Math.min(
+            cur[j - 1] + 1,
+            prev[j] + 1,
+            prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+          );
+        }
+        [prev, cur] = [cur, prev];
+      }
+      return prev[n];
+    },
+
+    similarity(a, b) {
+      if (a === b) return 1;
+      const d = PdfConverter.Utils.levenshtein(a, b);
+      return 1 - d / Math.max(a.length, b.length, 1);
+    },
+
+    rangesOverlap(a0, a1, b0, b1) {
+      return Math.max(a0, b0) <= Math.min(a1, b1);
+    },
+
+    centerY(w) {
+      return (w.y0 + w.y1) / 2;
+    },
+
+    centerX(w) {
+      return (w.x0 + w.x1) / 2;
+    },
+
+    clusterNumbers(nums, tol) {
+      const a = [...nums].filter(Number.isFinite).sort((x, y) => x - y);
+      const clusters = [];
+      for (const n of a) {
+        const last = clusters[clusters.length - 1];
+        if (!last || Math.abs(n - last.mean) > tol) {
+          clusters.push({ values: [n], mean: n });
+        } else {
+          last.values.push(n);
+          last.mean = last.values.reduce((x, y) => x + y, 0) / last.values.length;
+        }
+      }
+      return clusters.map((c) => c.mean);
+    },
+
+    nearestIndex(arr, value) {
+      if (!arr.length) return -1;
+      let idx = 0;
+      let d = Infinity;
+      arr.forEach((v, i) => {
+        const nd = Math.abs(v - value);
+        if (nd < d) { d = nd; idx = i; }
+      });
+      return idx;
+    },
+
+    wordsConfidence(words) {
+      const c = words.map((w) => Number(w.conf)).filter(Number.isFinite).filter((v) => v >= 0);
+      return c.length ? Math.max(0, Math.min(1, c.reduce((a, b) => a + b, 0) / c.length / 100)) : 0;
+    },
+
+    trimMatrix(matrix) {
+      let m = matrix.map((r) => r.map((v) => String(v ?? '').trim()));
+      while (m.length && !m[0].some(Boolean)) m.shift();
+      while (m.length && !m[m.length - 1].some(Boolean)) m.pop();
+      let max = Math.max(0, ...m.map((r) => r.length));
+      while (max > 0 && m.every((r) => !String(r[max - 1] || '').trim())) max--;
+      return m.map((r) => r.slice(0, max));
+    },
+
+    rowsToText(rows) {
+      return rows.map((r) => r.map((w) => w.text).join(' ')).join('\n');
+    },
+
+    escapeHtml(s) {
+      return String(s).replace(/[&<>'"]/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      }[c]));
+    },
+
+    sanitizeName(s) {
+      return String(s).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 100) || 'PDF_таблицы';
+    },
+
+    sanitizeSheet(s) {
+      return String(s).replace(/[\\\/?*[\]:]/g, '_');
+    },
+
+    formatBytes(b) {
+      if (!b) return '0 Б';
+      const u = ['Б', 'КБ', 'МБ', 'ГБ'];
+      const i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), u.length - 1);
+      return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+    },
+
+    disposeCanvas(canvas) {
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.width = 1;
+      canvas.height = 1;
+    },
+
+    revokeObjectUrl(url) {
+      if (url && String(url).startsWith('blob:')) {
+        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+      }
+    },
+
+    saveBlob(blob, name) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 1000);
+    },
+
+    translateOcrStatus(s) {
+      return ({
+        'loading tesseract core': 'Загрузка OCR-ядра',
+        'initializing tesseract': 'Инициализация OCR',
+        'loading language traineddata': 'Загрузка языков',
+        'initializing api': 'Подготовка языка',
+        'recognizing text': 'Распознавание текста'
+      }[s] || s);
+    },
+
+    userError(err) {
+      const msg = err?.message || String(err);
+      if (/password|encrypted/i.test(msg)) return 'PDF защищён паролем. Откройте файл без пароля и повторите.';
+      if (/Invalid PDF/i.test(msg)) return 'Файл повреждён или не является PDF.';
+      if (/network|fetch|Failed to fetch/i.test(msg)) return 'Нет доступа к интернету для загрузки OCR-библиотек. Проверьте соединение.';
+      if (/memory|allocation/i.test(msg)) return 'Недостаточно памяти. Уменьшите качество OCR или обрабатывайте файлы по одному.';
+      return msg;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { similarity } = PdfConverter.Utils;
+
+  const LATIN_MAP = { a: 'а', b: 'в', e: 'е', k: 'к', m: 'м', h: 'н', o: 'о', p: 'р', c: 'с', t: 'т', x: 'х', y: 'у' };
+
+  PdfConverter.TextNormalizer = {
+    normalizeText(text) {
+      return String(text || '')
+        .toLowerCase()
+        .replace(/ё/g, 'е')
+        .replace(/[abekmhopctxy]/g, (ch) => LATIN_MAP[ch] || ch)
+        .replace(/8/g, 'в')
+        .replace(/6/g, 'б')
+        .replace(/0/g, 'о')
+        .replace(/\|/g, 'і')
+        .replace(/[^а-я0-9]+/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    },
+
+    normalizeWord(text) {
+      return PdfConverter.TextNormalizer.normalizeText(text).replace(/\s/g, '');
+    },
+
+    dehyphenateWords(words) {
+      const out = [];
+      for (let i = 0; i < words.length; i++) {
+        const w = { ...words[i] };
+        const t = w.text || '';
+        if (/-$|–$|—$/.test(t) && i + 1 < words.length) {
+          const next = words[i + 1];
+          const gap = next.x0 - w.x1;
+          const sameLine = Math.abs(PdfConverter.Utils.centerY(w) - PdfConverter.Utils.centerY(next)) < Math.max(8, (w.y1 - w.y0) * 0.8);
+          if (sameLine && gap < Math.max(40, (w.x1 - w.x0) * 0.5)) {
+            w.text = t.replace(/[-–—]+$/, '') + (next.text || '');
+            w.x1 = next.x1;
+            w.y0 = Math.min(w.y0, next.y0);
+            w.y1 = Math.max(w.y1, next.y1);
+            i++;
+          }
+        }
+        out.push(w);
+      }
+      return out;
+    },
+
+    buildVirtualLines(words, lineTolerance) {
+      const sorted = [...words].filter((w) => w.text?.trim()).sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+      const heights = sorted.map((w) => Math.max(1, w.y1 - w.y0));
+      const tol = lineTolerance || Math.max(10, (PdfConverter.Utils.median(heights) || 14) * 0.65);
+      const lines = [];
+      for (const w of sorted) {
+        const cy = PdfConverter.Utils.centerY(w);
+        let best = null;
+        let bestDist = Infinity;
+        for (const line of lines) {
+          const d = Math.abs(cy - line.cy);
+          if (d < tol && d < bestDist) { best = line; bestDist = d; }
+        }
+        if (!best) {
+          best = { cy, words: [] };
+          lines.push(best);
+        }
+        best.words.push(w);
+        best.cy = (best.cy * (best.words.length - 1) + cy) / best.words.length;
+      }
+      return lines.sort((a, b) => a.cy - b.cy).map((l) => ({
+        text: l.words.sort((a, b) => a.x0 - b.x0).map((w) => w.text).join(' '),
+        y0: Math.min(...l.words.map((w) => w.y0)),
+        y1: Math.max(...l.words.map((w) => w.y1)),
+        words: l.words
+      }));
+    },
+
+    lineSimilarity(lineText, phrase) {
+      const a = PdfConverter.TextNormalizer.normalizeText(lineText);
+      const b = PdfConverter.TextNormalizer.normalizeText(phrase);
+      if (!a || !b) return 0;
+      if (a.includes(b) || b.includes(a)) return Math.min(1, b.length / Math.max(a.length, 1) + 0.35);
+      return similarity(a, b);
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { Utils } = PdfConverter;
+  const { median, centerY, clusterNumbers, nearestIndex, wordsConfidence, trimMatrix } = Utils;
+
+  PdfConverter.TableBuilder = {
+    groupRows(words) {
+      const sorted = [...words].filter((w) => w.text.trim()).sort((a, b) => centerY(a) - centerY(b) || a.x0 - b.x0);
+      const heights = sorted.map((w) => Math.max(1, w.y1 - w.y0));
+      const tolerance = Math.max(7, (median(heights) || 14) * 0.55);
+      const rows = [];
+      for (const word of sorted) {
+        const cy = centerY(word);
+        let best = null;
+        let bestDist = Infinity;
+        for (const row of rows) {
+          const d = Math.abs(cy - row.cy);
+          if (d < tolerance && d < bestDist) { best = row; bestDist = d; }
+        }
+        if (!best) { best = { cy, words: [] }; rows.push(best); }
+        best.words.push(word);
+        best.cy = (best.cy * (best.words.length - 1) + cy) / best.words.length;
+      }
+      return rows.sort((a, b) => a.cy - b.cy).map((r) => r.words.sort((a, b) => a.x0 - b.x0));
+    },
+
+    rowToCells(row, width) {
+      const charWidths = row.map((w) => (w.x1 - w.x0) / Math.max(1, w.text.length)).filter(Number.isFinite);
+      const baseChar = median(charWidths) || 8;
+      const cells = [];
+      let cell = null;
+      for (const w of row) {
+        const gap = cell ? w.x0 - cell.x1 : Infinity;
+        const splitGap = Math.max(baseChar * 2.6, width * 0.018);
+        if (!cell || gap > splitGap) {
+          cell = { x0: w.x0, x1: w.x1, text: w.text };
+          cells.push(cell);
+        } else {
+          cell.text += ' ' + w.text;
+          cell.x1 = w.x1;
+        }
+      }
+      return cells;
+    },
+
+    rowsToMatrix(rows, width, lineAnchors) {
+      const cellsByRow = [];
+      const starts = [];
+      const widths = [];
+      for (const row of rows) {
+        const cells = PdfConverter.TableBuilder.rowToCells(row, width);
+        cellsByRow.push(cells);
+        cells.forEach((c) => { starts.push(c.x0); widths.push(c.x1 - c.x0); });
+      }
+      const anchorTolerance = Math.max(18, (median(widths) || 60) * 0.28, width * 0.012);
+      const anchors = lineAnchors?.length
+        ? lineAnchors
+        : clusterNumbers(starts, anchorTolerance).sort((a, b) => a - b);
+      const colCount = Math.max(anchors.length, 1);
+      const matrix = cellsByRow.map((cells) => {
+        const row = Array(colCount).fill('');
+        for (const c of cells) {
+          let idx = nearestIndex(anchors, c.x0);
+          if (idx < 0) idx = 0;
+          row[idx] = row[idx] ? `${row[idx]} ${c.text}` : c.text;
+        }
+        return row;
+      });
+      return { matrix, anchors, confidence: wordsConfidence(rows.flat()) };
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { Utils, TextNormalizer } = PdfConverter;
+  const { normalizeText, normalizeWord, dehyphenateWords, buildVirtualLines, lineSimilarity } = TextNormalizer;
+
+  PdfConverter.PhraseMatcher = {
+    getWords(data) {
+      const words = [];
+      if (Array.isArray(data.words) && data.words.length) {
+        data.words.forEach((w) => words.push({
+          text: w.text || '',
+          conf: Number(w.confidence ?? w.conf ?? 0),
+          x0: Number(w.bbox?.x0 ?? w.x0 ?? 0),
+          y0: Number(w.bbox?.y0 ?? w.y0 ?? 0),
+          x1: Number(w.bbox?.x1 ?? w.x1 ?? 0),
+          y1: Number(w.bbox?.y1 ?? w.y1 ?? 0)
+        }));
+      }
+      if (!words.length && data.blocks) {
+        const walk = (node) => {
+          if (!node) return;
+          if (node.words) {
+            node.words.forEach((w) => words.push({
+              text: w.text || '',
+              conf: Number(w.confidence ?? w.conf ?? 0),
+              x0: Number(w.bbox?.x0 ?? w.x0 ?? 0),
+              y0: Number(w.bbox?.y0 ?? w.y0 ?? 0),
+              x1: Number(w.bbox?.x1 ?? w.x1 ?? 0),
+              y1: Number(w.bbox?.y1 ?? w.y1 ?? 0)
+            }));
+          }
+          if (node.lines) node.lines.forEach(walk);
+          if (node.paragraphs) node.paragraphs.forEach(walk);
+          if (node.blocks) node.blocks.forEach(walk);
+        };
+        walk({ blocks: data.blocks });
+      }
+      if (!words.length && data.tsv) {
+        data.tsv.split(/\r?\n/).slice(1).forEach((line) => {
+          const c = line.split('\t');
+          if (c.length >= 12 && c[0] === '5') {
+            words.push({
+              text: c.slice(11).join('\t'),
+              conf: Number(c[10]),
+              x0: Number(c[6]),
+              y0: Number(c[7]),
+              x1: Number(c[6]) + Number(c[8]),
+              y1: Number(c[7]) + Number(c[9])
+            });
+          }
+        });
+      }
+      return dehyphenateWords(words);
+    },
+
+    findPhraseMatches(words, phrase, threshold, maxMatches = 5) {
+      const wordHits = PdfConverter.PhraseMatcher._findWordMatches(words, phrase, threshold, maxMatches);
+      const lineHits = PdfConverter.PhraseMatcher._findLineMatches(words, phrase, threshold, maxMatches);
+      const merged = [...wordHits, ...lineHits];
+      merged.sort((a, b) => b.score - a.score);
+      const picked = [];
+      for (const c of merged) {
+        if (picked.some((p) => Utils.rangesOverlap(c.from, c.to, p.from, p.to) || Math.abs(c.y0 - p.y0) < 10)) continue;
+        picked.push(c);
+        if (picked.length >= maxMatches) break;
+      }
+      return picked.sort((a, b) => a.y0 - b.y0);
+    },
+
+    _findWordMatches(words, phrase, threshold, maxMatches) {
+      const prepared = words.map((w, i) => ({ ...w, i, n: normalizeWord(w.text) })).filter((w) => w.n);
+      const targetTokens = normalizeText(phrase).split(' ').filter(Boolean);
+      const target = targetTokens.join(' ');
+      if (!targetTokens.length || !prepared.length) return [];
+      const minLen = Math.max(1, targetTokens.length - 2);
+      const maxLen = targetTokens.length + 4;
+      const candidates = [];
+      for (let i = 0; i < prepared.length; i++) {
+        for (let len = minLen; len <= maxLen && i + len <= prepared.length; len++) {
+          const slice = prepared.slice(i, i + len);
+          const candidate = slice.map((x) => x.n).join(' ');
+          const score = Utils.similarity(candidate, target);
+          if (score >= threshold) {
+            candidates.push({
+              score,
+              from: slice[0].i,
+              to: slice[slice.length - 1].i,
+              y0: Math.min(...slice.map((x) => x.y0)),
+              y1: Math.max(...slice.map((x) => x.y1)),
+              x0: Math.min(...slice.map((x) => x.x0)),
+              x1: Math.max(...slice.map((x) => x.x1)),
+              recognized: slice.map((x) => x.text).join(' ')
+            });
+          }
+        }
+      }
+      return candidates;
+    },
+
+    _findLineMatches(words, phrase, threshold, maxMatches) {
+      const lines = buildVirtualLines(words);
+      const hits = [];
+      const target = normalizeText(phrase);
+      for (let i = 0; i < lines.length; i++) {
+        let combined = lines[i].text;
+        let y0 = lines[i].y0;
+        let y1 = lines[i].y1;
+        let wordFrom = words.indexOf(lines[i].words[0]);
+        let wordTo = words.indexOf(lines[i].words[lines[i].words.length - 1]);
+        for (let span = 0; span < 3 && i + span < lines.length; span++) {
+          if (span > 0) {
+            combined += ' ' + lines[i + span].text;
+            y1 = lines[i + span].y1;
+            wordTo = words.indexOf(lines[i + span].words[lines[i + span].words.length - 1]);
+          }
+          const score = lineSimilarity(combined, phrase);
+          const norm = normalizeText(combined);
+          if (score >= threshold || (norm.includes(target) && target.length >= 6)) {
+            hits.push({
+              score: Math.max(score, Utils.similarity(norm, target)),
+              from: wordFrom >= 0 ? wordFrom : 0,
+              to: wordTo >= 0 ? wordTo : wordFrom,
+              y0, y1,
+              x0: Math.min(...lines[i].words.map((w) => w.x0)),
+              x1: Math.max(...lines[i + span].words.map((w) => w.x1)),
+              recognized: combined
+            });
+          }
+        }
+      }
+      return hits.slice(0, maxMatches);
+    },
+
+    filterStopHits(stopHits, words, width) {
+      const rows = PdfConverter.TableBuilder.groupRows(words);
+      return stopHits.filter((hit) => !PdfConverter.PhraseMatcher._isInsideTableRow(hit, rows, width));
+    },
+
+    _isInsideTableRow(hit, rows, width) {
+      const row = rows.find((r) => {
+        const top = Math.min(...r.map((w) => w.y0));
+        const bottom = Math.max(...r.map((w) => w.y1));
+        const cy = (hit.y0 + hit.y1) / 2;
+        return cy >= top - 2 && cy <= bottom + 2;
+      });
+      if (!row) return false;
+      const cells = PdfConverter.TableBuilder.rowToCells(row, width);
+      const filled = cells.filter((c) => String(c.text || '').trim()).length;
+      if (filled >= 3) return true;
+      const rowText = row.map((w) => w.text).join(' ');
+      const norm = normalizeText(rowText);
+      if (/^в\s+штат\b/.test(norm) && filled <= 2 && row.length <= 4) return false;
+      return filled >= 2 && row.length >= 4;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+
+  PdfConverter.PdfLoader = {
+  async loadFile(file) {
+      if (!file) throw new Error('Файл не выбран.');
+      const name = file.name || '';
+      if (!/\.pdf$/i.test(name) && file.type && file.type !== 'application/pdf') {
+        throw new Error(`«${name}» не является PDF-файлом.`);
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (!bytes.length) throw new Error(`Файл «${name}» пуст.`);
+      const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+      return { file, doc, bytes };
+    },
+
+    async loadFiles(files) {
+      const docs = [];
+      let totalPages = 0;
+      for (const file of files) {
+        const loaded = await PdfConverter.PdfLoader.loadFile(file);
+        docs.push(loaded);
+        totalPages += loaded.doc.numPages;
+      }
+      return { docs, totalPages };
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { disposeCanvas } = PdfConverter.Utils;
+
+  PdfConverter.PdfRenderer = {
+    async renderPage(page, scale) {
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      return { canvas, ctx, viewport, width: canvas.width, height: canvas.height };
+    },
+
+    cropRegion(sourceCanvas, y0, y1) {
+      const top = Math.max(0, Math.floor(y0));
+      const bottom = Math.min(sourceCanvas.height, Math.ceil(y1));
+      const height = bottom - top;
+      if (height < 20) return null;
+      const crop = document.createElement('canvas');
+      crop.width = sourceCanvas.width;
+      crop.height = height;
+      crop.getContext('2d').drawImage(sourceCanvas, 0, top, sourceCanvas.width, height, 0, 0, sourceCanvas.width, height);
+      return { canvas: crop, top, bottom, height, width: crop.width };
+    },
+
+    canvasToPngBlob(canvas) {
+      return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('Не удалось создать изображение фрагмента.'))), 'image/png');
+      });
+    },
+
+    release(renderResult) {
+      if (renderResult?.canvas) disposeCanvas(renderResult.canvas);
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+
+  PdfConverter.ImagePreprocessor = {
+    enhance(canvas, options = {}) {
+      if (!options.enabled) return canvas;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const { width, height } = canvas;
+      const imageData = ctx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+      const contrast = options.contrast ?? 1.25;
+      const brightness = options.brightness ?? 8;
+
+      for (let i = 0; i < data.length; i += 4) {
+        let g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        g = (g - 128) * contrast + 128 + brightness;
+        g = Math.max(0, Math.min(255, g));
+        if (options.binarize) g = g < (options.threshold ?? 165) ? 0 : 255;
+        data[i] = data[i + 1] = data[i + 2] = g;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      return canvas;
+    },
+
+    copyCanvas(source) {
+      const c = document.createElement('canvas');
+      c.width = source.width;
+      c.height = source.height;
+      c.getContext('2d').drawImage(source, 0, 0);
+      return c;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { PhraseMatcher } = PdfConverter;
+
+  PdfConverter.OcrEngine = {
+    worker: null,
+
+    async init(onProgress) {
+      if (this.worker) return this.worker;
+      this.worker = await Tesseract.createWorker(['rus', 'eng'], 1, {
+        logger: (m) => {
+          if (onProgress && m.status) onProgress(m);
+        }
+      });
+      await this.worker.setParameters({
+        preserve_interword_spaces: '1',
+        tessedit_pageseg_mode: Tesseract.PSM.AUTO
+      });
+      return this.worker;
+    },
+
+    async recognize(canvas, signal) {
+      if (signal?.aborted) throw new DOMException('Обработка отменена.', 'AbortError');
+      const rec = await this.worker.recognize(canvas, {}, { text: true, blocks: true, tsv: true });
+      if (signal?.aborted) throw new DOMException('Обработка отменена.', 'AbortError');
+      const words = PhraseMatcher.getWords(rec.data).filter((w) => w.text && w.conf > -1);
+      return {
+        words,
+        rawText: rec.data.text || '',
+        data: rec.data
+      };
+    },
+
+    async terminate() {
+      if (!this.worker) return;
+      try { await this.worker.terminate(); } catch (_) { /* ignore */ }
+      this.worker = null;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { Utils, TableBuilder } = PdfConverter;
+  const { median, trimMatrix } = Utils;
+
+  PdfConverter.TableDetector = {
+    detectLineGrid(canvas) {
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const { width, height } = canvas;
+      if (width < 20 || height < 20) return { hLines: [], vLines: [] };
+      const step = Math.max(1, Math.floor(Math.min(width, height) / 400));
+      const data = ctx.getImageData(0, 0, width, height).data;
+      const isDark = (x, y) => {
+        const i = (y * width + x) * 4;
+        const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        return g < 140;
+      };
+
+      const hLines = [];
+      for (let y = 0; y < height; y += step) {
+        let dark = 0;
+        let total = 0;
+        for (let x = 0; x < width; x += step) { total++; if (isDark(x, y)) dark++; }
+        if (total && dark / total > 0.55) hLines.push(y);
+      }
+      const vLines = [];
+      for (let x = 0; x < width; x += step) {
+        let dark = 0;
+        let total = 0;
+        for (let y = 0; y < height; y += step) { total++; if (isDark(x, y)) dark++; }
+        if (total && dark / total > 0.55) vLines.push(x);
+      }
+      return {
+        hLines: PdfConverter.TableDetector._clusterLines(hLines, 6),
+        vLines: PdfConverter.TableDetector._clusterLines(vLines, 6)
+      };
+    },
+
+    _clusterLines(lines, tol) {
+      if (!lines.length) return [];
+      const sorted = [...lines].sort((a, b) => a - b);
+      const out = [];
+      let cluster = [sorted[0]];
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i] - sorted[i - 1] <= tol) cluster.push(sorted[i]);
+        else {
+          out.push(Math.round(cluster.reduce((a, b) => a + b, 0) / cluster.length));
+          cluster = [sorted[i]];
+        }
+      }
+      out.push(Math.round(cluster.reduce((a, b) => a + b, 0) / cluster.length));
+      return out;
+    },
+
+    extractTables(words, canvas, pageNum) {
+      const width = canvas.width;
+      const height = canvas.height;
+      const rows = TableBuilder.groupRows(words);
+      if (!rows.length) return [];
+
+      const grid = PdfConverter.TableDetector.detectLineGrid(canvas);
+      const lineAnchors = grid.vLines.length >= 2 ? grid.vLines : null;
+
+      const rowHeights = rows.map((r) => Math.max(...r.map((w) => w.y1)) - Math.min(...r.map((w) => w.y0))).filter((x) => x > 0);
+      const medH = median(rowHeights) || 18;
+      const groups = [];
+      let current = [];
+      let prevBottom = null;
+      for (const row of rows) {
+        const top = Math.min(...row.map((w) => w.y0));
+        const bottom = Math.max(...row.map((w) => w.y1));
+        if (prevBottom !== null && top - prevBottom > medH * 2.6 && current.length) {
+          groups.push(current);
+          current = [];
+        }
+        current.push(row);
+        prevBottom = bottom;
+      }
+      if (current.length) groups.push(current);
+
+      const tables = [];
+      let tableIndex = 0;
+      for (const group of groups) {
+        const structured = TableBuilder.rowsToMatrix(group, width, lineAnchors);
+        const nonEmpty = structured.matrix.filter((r) => r.some((v) => String(v || '').trim()));
+        const maxCols = Math.max(0, ...nonEmpty.map((r) => r.length));
+        const multiCellRows = nonEmpty.filter((r) => r.filter((v) => String(v || '').trim()).length >= 2).length;
+        if (nonEmpty.length >= 2 && maxCols >= 2 && multiCellRows >= Math.min(2, nonEmpty.length)) {
+          tableIndex++;
+          tables.push({
+            id: `p${pageNum}_t${tableIndex}`,
+            page: pageNum,
+            matrix: trimMatrix(nonEmpty),
+            anchors: structured.anchors,
+            confidence: structured.confidence,
+            excluded: false,
+            hasLines: !!(lineAnchors && lineAnchors.length >= 2)
+          });
+        }
+      }
+      if (!tables.length && rows.length >= 2) {
+        const structured = TableBuilder.rowsToMatrix(rows, width, lineAnchors);
+        tables.push({
+          id: `p${pageNum}_t1`,
+          page: pageNum,
+          matrix: trimMatrix(structured.matrix),
+          anchors: structured.anchors,
+          confidence: Math.min(structured.confidence, 0.45),
+          excluded: false,
+          fallback: true,
+          hasLines: !!(lineAnchors && lineAnchors.length >= 2)
+        });
+      }
+      return tables;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { Utils } = PdfConverter;
+  const { similarity } = Utils;
+
+  PdfConverter.TableMerger = {
+    mergeSectionTables(section) {
+      if (!section.tables || section.tables.length < 2) return section.tables || [];
+      const active = section.tables.filter((t) => !t.excluded);
+      if (active.length < 2) return section.tables;
+
+      const merged = [];
+      let buffer = null;
+
+      const flush = () => {
+        if (buffer) merged.push(buffer);
+        buffer = null;
+      };
+
+      for (const table of active) {
+        if (!buffer) {
+          buffer = { ...table, pages: [table.page], matrix: table.matrix.map((r) => [...r]) };
+          continue;
+        }
+        if (PdfConverter.TableMerger._canMerge(buffer, table)) {
+          const rows = PdfConverter.TableMerger._mergeMatrices(buffer.matrix, table.matrix);
+          buffer.matrix = rows;
+          buffer.pages.push(table.page);
+          buffer.page = `${buffer.pages[0]}–${table.page}`;
+          buffer.confidence = (buffer.confidence + table.confidence) / 2;
+          buffer.merged = true;
+        } else {
+          flush();
+          buffer = { ...table, pages: [table.page], matrix: table.matrix.map((r) => [...r]) };
+        }
+      }
+      flush();
+
+      const excluded = section.tables.filter((t) => t.excluded);
+      const result = [...merged, ...excluded];
+      let idx = 0;
+      return result.map((t) => {
+        if (t.excluded) return t;
+        idx++;
+        return { ...t, id: `${section.id}_tbl_${idx}` };
+      });
+    },
+
+    _lastPage(table) {
+      if (table.pages?.length) return table.pages[table.pages.length - 1];
+      if (typeof table.page === 'number') return table.page;
+      return parseInt(String(table.page).split('–').pop(), 10);
+    },
+
+    _canMerge(a, b) {
+      if (typeof b.page !== 'number') return false;
+      if (b.page !== PdfConverter.TableMerger._lastPage(a) + 1) return false;
+      const colsA = a.anchors?.length || (a.matrix[0]?.length || 0);
+      const colsB = b.anchors?.length || (b.matrix[0]?.length || 0);
+      if (!colsA || !colsB) return false;
+      if (Math.abs(colsA - colsB) > 1) return false;
+      const headerA = (a.matrix[0] || []).map((c) => String(c).toLowerCase().trim());
+      const headerB = (b.matrix[0] || []).map((c) => String(c).toLowerCase().trim());
+      if (headerA.length && headerB.length) {
+        const sim = headerA.map((h, i) => similarity(h, headerB[i] || '')).filter((_, i) => headerA[i] && headerB[i]);
+        const avg = sim.length ? sim.reduce((x, y) => x + y, 0) / sim.length : 0;
+        if (avg > 0.82) return true;
+      }
+      return colsA === colsB;
+    },
+
+    _mergeMatrices(matrixA, matrixB) {
+      const headerA = (matrixA[0] || []).join('|').toLowerCase();
+      const headerB = (matrixB[0] || []).join('|').toLowerCase();
+      const skipHeader = similarity(headerA, headerB) > 0.8;
+      const tail = skipHeader ? matrixB.slice(1) : matrixB;
+      return [...matrixA, ...tail];
+    },
+
+    countActiveTables(tables) {
+      return (tables || []).filter((t) => !t.excluded).length;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+
+  /**
+   * Чистая логика state machine разделов.
+   * После стоп-фразы выставляется searchFromY — следующие ключевые фразы
+   * принимаются только ниже этой координаты (повторный поиск).
+   */
+  PdfConverter.SectionStateMachine = {
+    createState() {
+      return {
+        active: null,
+        sectionCounter: 0,
+        searchFromY: 0,
+        cursorY: null
+      };
+    },
+
+    beginPage(state, continuingSection) {
+      if (!state.active) {
+        state.searchFromY = 0;
+      }
+      state.cursorY = state.active ? 0 : null;
+      return state;
+    },
+
+  /**
+   * @returns {{ state, actions: Array }}
+   */
+    processEvents(state, events, ctx) {
+      const { pageNum, pageHeight, stop } = ctx;
+      const actions = [];
+
+      for (const event of events) {
+        if (!state.active && event.kind === 'start') {
+          if (event.y0 < state.searchFromY - 5) {
+            actions.push({
+              type: 'skip_start',
+              reason: 'above_search_from_y',
+              pageNum,
+              y0: event.y0,
+              searchFromY: state.searchFromY
+            });
+            continue;
+          }
+          state.sectionCounter++;
+          state.active = {
+            id: ctx.makeSectionId(state.sectionCounter),
+            title: event.phrase,
+            recognizedTitle: event.recognized,
+            startPage: pageNum,
+            endPage: pageNum,
+            startScore: event.score,
+            stopFound: false,
+            phraseLog: [{
+              type: 'start', page: pageNum, phrase: event.phrase, score: event.score, text: event.recognized
+            }]
+          };
+          state.cursorY = Math.min(pageHeight, event.y1 + Math.max(8, pageHeight * 0.004));
+          actions.push({ type: 'section_start', section: state.active, pageNum });
+          continue;
+        }
+
+        if (state.active && event.kind === 'stop' && event.y0 >= (state.cursorY ?? 0)) {
+          const closing = state.active;
+          actions.push({
+            type: 'section_stop',
+            section: closing,
+            pageNum,
+            y0: state.cursorY ?? 0,
+            y1: event.y0,
+            score: event.score,
+            recognized: event.recognized
+          });
+          closing.endPage = pageNum;
+          closing.stopFound = true;
+          closing.stopScore = event.score;
+          closing.phraseLog.push({
+            type: 'stop', page: pageNum, phrase: stop, score: event.score, text: event.recognized
+          });
+          actions.push({ type: 'section_finalize', section: closing });
+          state.active = null;
+          state.cursorY = null;
+          state.searchFromY = event.y1 + Math.max(8, pageHeight * 0.004);
+          actions.push({
+            type: 'resume_search',
+            pageNum,
+            searchFromY: state.searchFromY,
+            message: `Повторный поиск ключевых фраз ниже стоп-фразы (Y ≥ ${Math.round(state.searchFromY)})`
+          });
+        }
+      }
+
+      if (state.active && pageHeight > (state.cursorY ?? 0) + 15) {
+        actions.push({
+          type: 'page_tail',
+          pageNum,
+          y0: state.cursorY ?? 0,
+          y1: pageHeight
+        });
+      }
+
+      return { state, actions };
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+
+  PdfConverter.ErrorLogger = {
+    logs: [],
+
+    reset() {
+      this.logs = [];
+    },
+
+    log(message, type = '') {
+      const line = `[${new Date().toLocaleTimeString('ru-RU')}] ${message}`;
+      this.logs.push({ line, type, message });
+      return { line, type };
+    },
+
+    phraseHit(pageNum, kind, phrase, score, recognized) {
+      const label = kind === 'start' ? 'начало' : 'стоп';
+      return this.log(
+        `Стр. ${pageNum}: ${label} «${phrase}» — ${Math.round(score * 100)}% (${recognized})`,
+        kind === 'start' ? 'ok' : 'warning'
+      );
+    },
+
+    sectionFound(index, section) {
+      return this.log(
+        `Раздел ${index}: «${section.title}», стр. ${section.startPage}–${section.endPage}, таблиц: ${section.tables.filter((t) => !t.excluded).length}`,
+        section.stopFound ? 'ok' : 'warning'
+      );
+    },
+
+    error(err) {
+      const msg = PdfConverter.Utils.userError(err);
+      return this.log(`Ошибка: ${msg}`, 'error');
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const {
+    Utils, PdfRenderer, TableDetector, TableMerger, PhraseMatcher, TableBuilder, SectionStateMachine
+  } = PdfConverter;
+  const { disposeCanvas, rowsToText, sanitizeName, revokeObjectUrl } = Utils;
+
+  PdfConverter.SectionDetector = {
+    async processDocument(file, doc, ctx) {
+      const {
+        ocr, starts, stop, threshold, scale, preprocess, signal,
+        onPage, onPhrase, onSection, onResumeSearch, metrics
+      } = ctx;
+
+      const sections = [];
+      const images = [];
+      let active = null;
+      let sectionCounter = 0;
+      let searchFromY = 0;
+
+      for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
+        if (signal.aborted) break;
+
+        const page = await doc.getPage(pageNum);
+        let renderResult = null;
+        let ocrCanvas = null;
+
+        try {
+          renderResult = await PdfRenderer.renderPage(page, scale);
+          ocrCanvas = preprocess.enabled
+            ? PdfConverter.ImagePreprocessor.enhance(PdfConverter.ImagePreprocessor.copyCanvas(renderResult.canvas), preprocess)
+            : renderResult.canvas;
+
+          const ocrResult = await ocr.recognize(ocrCanvas, signal);
+          const words = ocrResult.words;
+          metrics.pages++;
+          onPage({ fileName: file.name, pageNum, totalPages: doc.numPages, phase: 'done' });
+
+          if (!active) searchFromY = 0;
+
+          const startHits = [];
+          for (const phrase of starts) {
+            for (const hit of PhraseMatcher.findPhraseMatches(words, phrase, threshold, 5)) {
+              startHits.push({ ...hit, kind: 'start', phrase });
+            }
+          }
+
+          let stopHits = PhraseMatcher.findPhraseMatches(words, stop, Math.max(0.60, threshold - 0.08), 10)
+            .map((h) => ({ ...h, kind: 'stop', phrase: stop }));
+          stopHits = PhraseMatcher.filterStopHits(stopHits, words, renderResult.width);
+
+          startHits.forEach((h) => onPhrase(pageNum, 'start', h));
+          stopHits.forEach((h) => onPhrase(pageNum, 'stop', h));
+
+          const events = [...startHits, ...stopHits].sort((a, b) => a.y0 - b.y0 || (a.kind === 'stop' ? 1 : -1));
+          let cursorY = active ? 0 : null;
+
+          for (const event of events) {
+            if (!active && event.kind === 'start') {
+              if (event.y0 < searchFromY - 5) continue;
+              sectionCounter++;
+              active = {
+                id: `${sanitizeName(file.name.replace(/\.pdf$/i, ''))}_${sectionCounter}`,
+                fileName: file.name,
+                title: event.phrase,
+                recognizedTitle: event.recognized,
+                startPage: pageNum,
+                endPage: pageNum,
+                startScore: event.score,
+                stopFound: false,
+                segments: [],
+                tables: [],
+                ocrText: [],
+                rawOcr: [],
+                warnings: [],
+                phraseLog: []
+              };
+              active.phraseLog.push({ type: 'start', page: pageNum, phrase: event.phrase, score: event.score, text: event.recognized });
+              cursorY = Math.min(renderResult.height, event.y1 + Math.max(8, renderResult.height * 0.004));
+              continue;
+            }
+            if (active && event.kind === 'stop' && event.y0 >= (cursorY ?? 0)) {
+              if (event.y0 > (cursorY ?? 0) + 15) {
+                await PdfConverter.SectionDetector._addSegment(active, renderResult.canvas, words, pageNum, cursorY ?? 0, event.y0, images);
+              }
+              active.endPage = pageNum;
+              active.stopFound = true;
+              active.stopScore = event.score;
+              active.phraseLog.push({ type: 'stop', page: pageNum, phrase: stop, score: event.score, text: event.recognized });
+              PdfConverter.SectionDetector._finalizeSection(active, sections, onSection, metrics);
+              active = null;
+              cursorY = null;
+              searchFromY = event.y1 + Math.max(8, renderResult.height * 0.004);
+              if (onResumeSearch) {
+                onResumeSearch({
+                  pageNum,
+                  searchFromY,
+                  message: `Повторный поиск ключевых фраз ниже стоп-фразы (стр. ${pageNum}, Y ≥ ${Math.round(searchFromY)})`
+                });
+              }
+            }
+          }
+
+          if (active) {
+            const fromY = cursorY ?? 0;
+            if (renderResult.height > fromY + 15) {
+              await PdfConverter.SectionDetector._addSegment(active, renderResult.canvas, words, pageNum, fromY, renderResult.height, images);
+            }
+            active.endPage = pageNum;
+          }
+        } catch (err) {
+          if (err.name === 'AbortError') break;
+          throw new Error(`Страница ${pageNum} (${file.name}): ${err.message || err}`);
+        } finally {
+          if (ocrCanvas && ocrCanvas !== renderResult?.canvas) disposeCanvas(ocrCanvas);
+          PdfRenderer.release(renderResult);
+        }
+      }
+
+      if (active) {
+        active.warnings.push('Стоп-фраза не найдена: раздел завершён на последней странице PDF.');
+        PdfConverter.SectionDetector._finalizeSection(active, sections, onSection, metrics);
+      }
+
+      return { sections, images };
+    },
+
+    async _addSegment(section, pageCanvas, pageWords, pageNum, y0, y1, images) {
+      const crop = PdfRenderer.cropRegion(pageCanvas, y0, y1);
+      if (!crop) return;
+
+      const blob = await PdfRenderer.canvasToPngBlob(crop.canvas);
+      const previewUrl = URL.createObjectURL(blob);
+      const imageName = `${section.id}_стр_${pageNum}_${section.segments.length + 1}.png`;
+
+      images.push({ name: imageName, blob, previewUrl });
+
+      const words = pageWords
+        .filter((w) => Utils.centerY(w) >= crop.top && Utils.centerY(w) < crop.bottom)
+        .map((w) => ({ ...w, y0: w.y0 - crop.top, y1: w.y1 - crop.top }));
+
+      const tables = TableDetector.extractTables(words, crop.canvas, pageNum);
+      const text = rowsToText(TableBuilder.groupRows(words));
+
+      section.ocrText.push({ page: pageNum, text });
+      section.rawOcr.push({ page: pageNum, text, words: words.map((w) => ({ ...w })) });
+      section.segments.push({
+        page: pageNum,
+        imageName,
+        previewUrl,
+        y0: crop.top,
+        y1: crop.bottom,
+        tablesCount: tables.length
+      });
+      section.tables.push(...tables.map((t) => ({ ...t, sectionId: section.id, previewUrl })));
+
+      disposeCanvas(crop.canvas);
+    },
+
+    _finalizeSection(section, sections, onSection, metrics) {
+      section.tables = TableMerger.mergeSectionTables(section);
+      if (!TableMerger.countActiveTables(section.tables)) {
+        section.warnings.push('Табличная структура не распознана; сохранён OCR-текст и изображение фрагмента.');
+      }
+      sections.push(section);
+      metrics.sections++;
+      metrics.tables += TableMerger.countActiveTables(section.tables);
+      onSection(section);
+    },
+
+    releaseImages(images) {
+      (images || []).forEach((img) => revokeObjectUrl(img.previewUrl));
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { Utils, TableMerger } = PdfConverter;
+
+  PdfConverter.ExcelBuilder = {
+    build(sections) {
+      const wb = XLSX.utils.book_new();
+      const summary = [['№', 'Файл', 'Раздел', 'Стартовая страница', 'Конечная страница', 'Стоп найден', 'Совпадение начала, %', 'Таблиц', 'Предупреждения']];
+      const ocrLog = [['Файл', 'Раздел', 'Страница', 'OCR-текст']];
+      const phraseLog = [['Файл', 'Раздел', 'Тип', 'Страница', 'Фраза', 'Совпадение %', 'Распознано']];
+
+      sections.forEach((s, si) => {
+        const activeTables = (s.tables || []).filter((t) => !t.excluded);
+        summary.push([
+          si + 1, s.fileName, s.title, s.startPage, s.endPage,
+          s.stopFound ? 'Да' : 'Нет',
+          Math.round((s.startScore || 0) * 100),
+          activeTables.length,
+          (s.warnings || []).join('; ')
+        ]);
+        (s.ocrText || []).forEach((t) => ocrLog.push([s.fileName, s.title, t.page, t.text]));
+        (s.phraseLog || []).forEach((p) => phraseLog.push([
+          s.fileName, s.title, p.type === 'start' ? 'Начало' : 'Стоп',
+          p.page, p.phrase, Math.round((p.score || 0) * 100), p.text
+        ]));
+      });
+
+      const wsSummary = XLSX.utils.aoa_to_sheet(summary);
+      PdfConverter.ExcelBuilder._setCols(wsSummary, [6, 32, 48, 18, 18, 14, 22, 10, 55]);
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Сводка');
+
+      let globalTable = 0;
+      sections.forEach((s, si) => {
+        const activeTables = (s.tables || []).filter((t) => !t.excluded);
+        if (!activeTables.length) {
+          const rows = [
+            [s.title],
+            [`Файл: ${s.fileName}`],
+            [`Страницы: ${s.startPage}–${s.endPage}`],
+            [],
+            ['OCR-текст']
+          ];
+          (s.ocrText || []).forEach((t) => {
+            rows.push([`Страница ${t.page}`]);
+            rows.push([t.text]);
+            rows.push([]);
+          });
+          const ws = XLSX.utils.aoa_to_sheet(rows);
+          PdfConverter.ExcelBuilder._setCols(ws, [120]);
+          XLSX.utils.book_append_sheet(wb, ws, PdfConverter.ExcelBuilder._uniqueSheetName(wb, `Раздел_${si + 1}`));
+        }
+        activeTables.forEach((t) => {
+          globalTable++;
+          const pageLabel = t.pages ? t.pages.join('–') : String(t.page);
+          const rows = [
+            [s.title],
+            [`Файл: ${s.fileName}`],
+            [`Страница: ${pageLabel}`],
+            [`Качество структуры: ${Math.round((t.confidence || 0) * 100)}%${t.fallback ? ' — резервный режим' : ''}${t.merged ? ' — объединено' : ''}`],
+            [],
+            ...t.matrix
+          ];
+          const ws = XLSX.utils.aoa_to_sheet(rows);
+          PdfConverter.ExcelBuilder._setCols(ws, PdfConverter.ExcelBuilder._autoColWidths(rows));
+          XLSX.utils.book_append_sheet(wb, ws, PdfConverter.ExcelBuilder._uniqueSheetName(wb, `Т${globalTable}_стр${pageLabel}`));
+        });
+      });
+
+      const wsOcr = XLSX.utils.aoa_to_sheet(ocrLog);
+      PdfConverter.ExcelBuilder._setCols(wsOcr, [32, 48, 10, 120]);
+      XLSX.utils.book_append_sheet(wb, wsOcr, 'OCR_журнал');
+
+      const wsPhrases = XLSX.utils.aoa_to_sheet(phraseLog);
+      PdfConverter.ExcelBuilder._setCols(wsPhrases, [32, 48, 12, 10, 40, 14, 60]);
+      XLSX.utils.book_append_sheet(wb, wsPhrases, 'Журнал_фраз');
+
+      return wb;
+    },
+
+    download(wb, filename) {
+      XLSX.writeFile(wb, filename, { compression: true });
+    },
+
+    async downloadZip(wb, filename, images, metrics) {
+      const zip = new JSZip();
+      const xlsx = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
+      zip.file(`${filename}.xlsx`, xlsx);
+      const folder = zip.folder('Фрагменты_скана');
+      for (const img of images) {
+        const data = img.blob ? await img.blob.arrayBuffer() : null;
+        if (data) folder.file(img.name, data);
+      }
+      zip.file('README.txt',
+        `PDF-конвертер таблиц\n\nExcel: таблицы, сводка, OCR-журнал, журнал фраз.\nФрагменты скана — в папке «Фрагменты_скана».\n\nРазделов: ${metrics.sections}\nТаблиц: ${metrics.tables}\n`
+      );
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+      Utils.saveBlob(blob, `${filename}_с_фрагментами.zip`);
+    },
+
+    _autoColWidths(rows) {
+      const max = Math.max(1, ...rows.map((r) => r.length));
+      return Array.from({ length: max }, (_, c) => Math.min(55, Math.max(12, ...rows.map((r) => String(r[c] ?? '').length + 2))));
+    },
+
+    _setCols(ws, widths) {
+      ws['!cols'] = widths.map((w) => ({ wch: w }));
+    },
+
+    _uniqueSheetName(wb, name) {
+      let base = Utils.sanitizeSheet(name).slice(0, 31) || 'Лист';
+      let n = base;
+      let i = 2;
+      while (wb.SheetNames.includes(n)) {
+        const suf = `_${i++}`;
+        n = base.slice(0, 31 - suf.length) + suf;
+      }
+      return n;
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const { TableMerger } = PdfConverter;
+
+  PdfConverter.UiController = {
+    $(id) {
+      return document.getElementById(id);
+    },
+
+    bind(state, handlers) {
+      const dropZone = this.$('dropZone');
+      const fileInput = this.$('fileInput');
+
+      const handleFiles = (files) => {
+        const pdfs = [...files].filter((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+        if (!pdfs.length && files.length) {
+          alert('Выберите файл в формате PDF.');
+          return;
+        }
+        handlers.onFiles(pdfs);
+      };
+
+      fileInput.addEventListener('change', () => {
+        handleFiles([...fileInput.files]);
+        fileInput.value = '';
+      });
+
+      dropZone.addEventListener('click', (e) => {
+        if (e.target.closest('input, button, a')) return;
+        fileInput.click();
+      });
+
+      ['dragenter', 'dragover'].forEach((evt) => dropZone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag');
+      }));
+      ['dragleave', 'drop'].forEach((evt) => dropZone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag');
+      }));
+      dropZone.addEventListener('drop', (e) => handleFiles([...e.dataTransfer.files]));
+
+      this.$('startBtn').addEventListener('click', handlers.onStart);
+      this.$('cancelBtn').addEventListener('click', handlers.onCancel);
+      this.$('excelBtn').addEventListener('click', handlers.onExcel);
+      this.$('zipBtn').addEventListener('click', handlers.onZip);
+      this.$('rebuildBtn')?.addEventListener('click', handlers.onRebuild);
+    },
+
+    setFiles(files) {
+      const list = this.$('fileList');
+      list.innerHTML = files.map((f) =>
+        `<div class="file-pill"><span title="${PdfConverter.Utils.escapeHtml(f.name)}">${PdfConverter.Utils.escapeHtml(f.name)}</span><b>${PdfConverter.Utils.formatBytes(f.size)}</b></div>`
+      ).join('');
+      this.$('startBtn').disabled = files.length === 0;
+    },
+
+    setBusy(busy, hasFiles) {
+      this.$('startBtn').disabled = busy || !hasFiles;
+      this.$('cancelBtn').disabled = !busy;
+      this.$('fileInput').disabled = busy;
+      ['startPhrases', 'stopPhrase', 'scale', 'threshold', 'preprocess'].forEach((id) => {
+        const el = this.$(id);
+        if (el) el.disabled = busy;
+      });
+    },
+
+    setProgress(pct, title, status, pageInfo) {
+      const p = Math.max(0, Math.min(100, pct));
+      this.$('bar').style.width = `${p}%`;
+      this.$('progressPct').textContent = `${Math.round(p)}%`;
+      this.$('progressTitle').textContent = title || 'Готов к работе';
+      this.$('status').textContent = status || '';
+      if (pageInfo) {
+        this.$('currentPage').textContent = pageInfo;
+      }
+    },
+
+    updateMetrics(metrics) {
+      this.$('mFiles').textContent = metrics.files;
+      this.$('mPages').textContent = metrics.pages;
+      this.$('mSections').textContent = metrics.sections;
+      this.$('mTables').textContent = metrics.tables;
+    },
+
+    appendLog(entry) {
+      const log = this.$('log');
+      if (log.dataset.empty === '1') {
+        log.textContent = '';
+        log.dataset.empty = '0';
+      }
+      const el = document.createElement('div');
+      if (entry.type) el.className = entry.type;
+      el.textContent = entry.line;
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+    },
+
+    clearLog() {
+      const log = this.$('log');
+      log.textContent = 'Журнал появится после запуска.';
+      log.dataset.empty = '1';
+    },
+
+    setExportEnabled(enabled) {
+      this.$('excelBtn').disabled = !enabled;
+      this.$('zipBtn').disabled = !enabled;
+      const rebuild = this.$('rebuildBtn');
+      if (rebuild) rebuild.disabled = !enabled;
+    },
+
+    renderPreview(state, onToggleTable) {
+      const container = this.$('preview');
+      if (!container) return;
+      if (!state.sections.length) {
+        container.innerHTML = '<div class="preview-empty">Фрагменты появятся после распознавания.</div>';
+        return;
+      }
+
+      let html = '';
+      state.sections.forEach((section, si) => {
+        html += `<div class="preview-section">
+          <h3>Раздел ${si + 1}: ${PdfConverter.Utils.escapeHtml(section.title)}</h3>
+          <div class="preview-meta">Стр. ${section.startPage}–${section.endPage} · ${section.fileName}</div>
+          <div class="preview-images">`;
+        (section.segments || []).forEach((seg) => {
+          html += `<figure class="preview-fig">
+            <img src="${seg.previewUrl}" alt="Стр. ${seg.page}" loading="lazy" />
+            <figcaption>Стр. ${seg.page}</figcaption>
+          </figure>`;
+        });
+        html += `</div><div class="preview-tables">`;
+        (section.tables || []).forEach((table) => {
+          const checked = table.excluded ? '' : 'checked';
+          const cls = table.excluded ? 'table-card excluded' : 'table-card';
+          const preview = (table.matrix || []).slice(0, 4).map((r) =>
+            `<tr>${r.map((c) => `<td>${PdfConverter.Utils.escapeHtml(String(c || ''))}</td>`).join('')}</tr>`
+          ).join('');
+          html += `<div class="${cls}" data-table-id="${PdfConverter.Utils.escapeHtml(table.id)}">
+            <label><input type="checkbox" class="table-toggle" data-table-id="${PdfConverter.Utils.escapeHtml(table.id)}" ${checked} />
+            Включить таблицу · стр. ${table.page}${table.merged ? ' (объединено)' : ''}</label>
+            <div class="table-mini"><table>${preview}</table></div>
+          </div>`;
+        });
+        html += `</div></div>`;
+      });
+      container.innerHTML = html;
+
+      container.querySelectorAll('.table-toggle').forEach((input) => {
+        input.addEventListener('change', () => onToggleTable(input.dataset.tableId, input.checked));
+      });
+    },
+
+    refreshTableCount(state) {
+      let count = 0;
+      state.sections.forEach((s) => { count += TableMerger.countActiveTables(s.tables); });
+      state.metrics.tables = count;
+      this.updateMetrics(state.metrics);
+    }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+
+(function (global) {
+  'use strict';
+
+  const PdfConverter = global.PdfConverter = global.PdfConverter || {};
+  const {
+    Utils, PdfLoader, OcrEngine, SectionDetector, ExcelBuilder, ErrorLogger, UiController, TableMerger
+  } = PdfConverter;
+
+  PdfConverter.App = {
+    state: {
+      files: [],
+      sections: [],
+      images: [],
+      workbook: null,
+      metrics: { files: 0, pages: 0, sections: 0, tables: 0 },
+      outputBase: 'PDF_таблицы',
+      abortController: null,
+      running: false
+    },
+
+    init() {
+      if (this._inited) return;
+      this._inited = true;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+      UiController.bind(this.state, {
+        onFiles: (files) => this.setFiles(files),
+        onStart: () => this.run(),
+        onCancel: () => this.cancel(),
+        onExcel: () => this.downloadExcel(),
+        onZip: () => this.downloadZip(),
+        onRebuild: () => this.rebuildWorkbook()
+      });
+    },
+
+    setFiles(files) {
+      this.state.files = files;
+      UiController.setFiles(files);
+      if (files.length) {
+        this.state.outputBase = Utils.sanitizeName(
+          files.length === 1 ? files[0].name.replace(/\.pdf$/i, '') + '_таблицы' : 'PDF_таблицы_сводно'
+        );
+      }
+    },
+
+    resetRun() {
+      SectionDetector.releaseImages(this.state.images);
+      this.state.sections = [];
+      this.state.images = [];
+      this.state.workbook = null;
+      this.state.metrics = { files: 0, pages: 0, sections: 0, tables: 0 };
+      ErrorLogger.reset();
+      UiController.clearLog();
+      UiController.updateMetrics(this.state.metrics);
+      UiController.setExportEnabled(false);
+      UiController.renderPreview(this.state, () => {});
+    },
+
+    cancel() {
+      if (this.state.abortController) this.state.abortController.abort();
+      UiController.appendLog(ErrorLogger.log('Запрошена остановка. Текущая страница будет завершена.', 'warning'));
+    },
+
+    toggleTable(tableId, included) {
+      for (const section of this.state.sections) {
+        const table = (section.tables || []).find((t) => t.id === tableId);
+        if (table) {
+          table.excluded = !included;
+          break;
+        }
+      }
+      UiController.refreshTableCount(this.state);
+      UiController.renderPreview(this.state, (id, chk) => this.toggleTable(id, chk));
+      this.rebuildWorkbook();
+    },
+
+    rebuildWorkbook() {
+      if (!this.state.sections.length) return;
+      this.state.workbook = ExcelBuilder.build(this.state.sections);
+      UiController.setExportEnabled(true);
+      UiController.appendLog(ErrorLogger.log('Excel пересобран с учётом выбранных таблиц.', 'ok'));
+    },
+
+    async run() {
+      if (!this.state.files.length || this.state.running) return;
+
+      const starts = UiController.$('startPhrases').value.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+      const stop = UiController.$('stopPhrase').value.trim();
+      const threshold = Math.max(0.55, Math.min(0.95, Number(UiController.$('threshold').value || 72) / 100));
+      const scale = Number(UiController.$('scale').value || 2.5);
+      const preprocess = {
+        enabled: UiController.$('preprocess')?.checked !== false,
+        contrast: 1.25,
+        binarize: false
+      };
+
+      if (!starts.length || !stop) {
+        alert('Укажите начальные и стоп-фразу.');
+        return;
+      }
+
+      this.resetRun();
+      this.state.running = true;
+      this.state.abortController = new AbortController();
+      const signal = this.state.abortController.signal;
+
+      UiController.setBusy(true, this.state.files.length > 0);
+      UiController.setProgress(1, 'Загрузка OCR', 'Подготавливаю русский и английский языки…', '—');
+
+      try {
+        await OcrEngine.init((m) => {
+          if (typeof m.progress === 'number') {
+            UiController.setProgress(
+              2 + Math.round(m.progress * 3),
+              'Загрузка OCR',
+              `${Utils.translateOcrStatus(m.status)}: ${Math.round(m.progress * 100)}%`,
+              '—'
+            );
+          }
+        });
+        UiController.appendLog(ErrorLogger.log('OCR-модуль rus+eng готов.', 'ok'));
+
+        const { docs, totalPages } = await PdfLoader.loadFiles(this.state.files);
+        let donePages = 0;
+
+        for (const { file, doc } of docs) {
+          if (signal.aborted) break;
+          UiController.appendLog(ErrorLogger.log(`Файл: ${file.name} — ${doc.numPages} стр.`));
+
+          const result = await SectionDetector.processDocument(file, doc, {
+            ocr: OcrEngine,
+            starts,
+            stop,
+            threshold,
+            scale,
+            preprocess,
+            signal,
+            metrics: this.state.metrics,
+            onPage: ({ fileName, pageNum, totalPages: tp }) => {
+              donePages++;
+              UiController.setProgress(
+                5 + Math.round((donePages / Math.max(totalPages, 1)) * 88),
+                `OCR: ${fileName}`,
+                `Страница ${pageNum} из ${tp}`,
+                `${fileName} · стр. ${pageNum}/${tp}`
+              );
+              UiController.updateMetrics(this.state.metrics);
+            },
+            onPhrase: (pageNum, kind, hit) => {
+              const entry = ErrorLogger.phraseHit(pageNum, kind, hit.phrase, hit.score, hit.recognized);
+              UiController.appendLog(entry);
+            },
+            onSection: (section) => {
+              this.state.sections.push(section);
+              const entry = ErrorLogger.sectionFound(this.state.metrics.sections, section);
+              UiController.appendLog(entry);
+              UiController.updateMetrics(this.state.metrics);
+              UiController.renderPreview(this.state, (id, chk) => this.toggleTable(id, chk));
+            },
+            onResumeSearch: (info) => {
+              UiController.appendLog(ErrorLogger.log(info.message, 'ok'));
+            }
+          });
+
+          this.state.images.push(...result.images);
+          this.state.metrics.files++;
+          UiController.updateMetrics(this.state.metrics);
+        }
+
+        if (signal.aborted) {
+          UiController.setProgress(100, 'Остановлено', 'Обработка остановлена. Можно выгрузить частичный результат.', '—');
+          UiController.appendLog(ErrorLogger.log('Обработка остановлена пользователем.', 'warning'));
+        } else {
+          UiController.setProgress(95, 'Формирование Excel', 'Собираю листы и журнал…', '—');
+        }
+
+        this.rebuildWorkbook();
+        UiController.setProgress(
+          100,
+          signal.aborted ? 'Частичный результат готов' : 'Готово',
+          `Разделов: ${this.state.metrics.sections}; таблиц: ${TableMerger.countActiveTables(this.state.sections.flatMap((s) => s.tables || []))}`,
+          '—'
+        );
+
+        if (!this.state.metrics.sections) {
+          UiController.appendLog(ErrorLogger.log('Начальные фразы не найдены. Снизьте порог до 65–68% или повысьте качество OCR.', 'warning'));
+        }
+      } catch (err) {
+        console.error(err);
+        const entry = ErrorLogger.error(err);
+        UiController.appendLog(entry);
+        UiController.setProgress(100, 'Ошибка', Utils.userError(err), '—');
+        alert(`Не удалось обработать PDF.\n\n${Utils.userError(err)}`);
+      } finally {
+        await OcrEngine.terminate();
+        this.state.running = false;
+        this.state.abortController = null;
+        UiController.setBusy(false, this.state.files.length > 0);
+      }
+    },
+
+    downloadExcel() {
+      if (!this.state.workbook) return;
+      ExcelBuilder.download(this.state.workbook, `${this.state.outputBase}.xlsx`);
+    },
+
+    async downloadZip() {
+      if (!this.state.workbook) return;
+      await ExcelBuilder.downloadZip(this.state.workbook, this.state.outputBase, this.state.images, this.state.metrics);
+    }
+  };
+
+  function boot() {
+    if (window.PdfConverter?.App) PdfConverter.App.init();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})(typeof window !== 'undefined' ? window : globalThis);
+
+  </script>
 </body>
 </html>

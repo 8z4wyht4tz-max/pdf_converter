@@ -13,7 +13,25 @@
       const dropZone = this.$('dropZone');
       const fileInput = this.$('fileInput');
 
-      fileInput.addEventListener('change', () => handlers.onFiles([...fileInput.files]));
+      const handleFiles = (files) => {
+        const pdfs = [...files].filter((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+        if (!pdfs.length && files.length) {
+          alert('Выберите файл в формате PDF.');
+          return;
+        }
+        handlers.onFiles(pdfs);
+      };
+
+      fileInput.addEventListener('change', () => {
+        handleFiles([...fileInput.files]);
+        fileInput.value = '';
+      });
+
+      dropZone.addEventListener('click', (e) => {
+        if (e.target.closest('input, button, a')) return;
+        fileInput.click();
+      });
+
       ['dragenter', 'dragover'].forEach((evt) => dropZone.addEventListener(evt, (e) => {
         e.preventDefault();
         dropZone.classList.add('drag');
@@ -22,9 +40,7 @@
         e.preventDefault();
         dropZone.classList.remove('drag');
       }));
-      dropZone.addEventListener('drop', (e) => {
-        handlers.onFiles([...e.dataTransfer.files].filter((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')));
-      });
+      dropZone.addEventListener('drop', (e) => handleFiles([...e.dataTransfer.files]));
 
       this.$('startBtn').addEventListener('click', handlers.onStart);
       this.$('cancelBtn').addEventListener('click', handlers.onCancel);
