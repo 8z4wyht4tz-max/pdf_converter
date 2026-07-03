@@ -153,6 +153,9 @@
               UiController.appendLog(entry);
               UiController.updateMetrics(this.state.metrics);
               UiController.renderPreview(this.state, (id, chk) => this.toggleTable(id, chk));
+            },
+            onResumeSearch: (info) => {
+              UiController.appendLog(ErrorLogger.log(info.message, 'ok'));
             }
           });
 

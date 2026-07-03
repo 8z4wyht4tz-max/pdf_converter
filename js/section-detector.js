@@ -3,7 +3,7 @@
 
   const PdfConverter = global.PdfConverter = global.PdfConverter || {};
   const {
-    Utils, PdfRenderer, TableDetector, TableMerger, PhraseMatcher, TableBuilder
+    Utils, PdfRenderer, TableDetector, TableMerger, PhraseMatcher, TableBuilder, SectionStateMachine
   } = PdfConverter;
   const { disposeCanvas, rowsToText, sanitizeName, revokeObjectUrl } = Utils;
 
@@ -11,13 +11,14 @@
     async processDocument(file, doc, ctx) {
       const {
         ocr, starts, stop, threshold, scale, preprocess, signal,
-        onPage, onPhrase, onSection, metrics
+        onPage, onPhrase, onSection, onResumeSearch, metrics
       } = ctx;
 
       const sections = [];
       const images = [];
       let active = null;
       let sectionCounter = 0;
+      let searchFromY = 0;
 
       for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
         if (signal.aborted) break;
@@ -37,9 +38,11 @@
           metrics.pages++;
           onPage({ fileName: file.name, pageNum, totalPages: doc.numPages, phase: 'done' });
 
+          if (!active) searchFromY = 0;
+
           const startHits = [];
           for (const phrase of starts) {
-            for (const hit of PhraseMatcher.findPhraseMatches(words, phrase, threshold, 3)) {
+            for (const hit of PhraseMatcher.findPhraseMatches(words, phrase, threshold, 5)) {
               startHits.push({ ...hit, kind: 'start', phrase });
             }
           }
@@ -56,6 +59,7 @@
 
           for (const event of events) {
             if (!active && event.kind === 'start') {
+              if (event.y0 < searchFromY - 5) continue;
               sectionCounter++;
               active = {
                 id: `${sanitizeName(file.name.replace(/\.pdf$/i, ''))}_${sectionCounter}`,
@@ -88,6 +92,14 @@
               PdfConverter.SectionDetector._finalizeSection(active, sections, onSection, metrics);
               active = null;
               cursorY = null;
+              searchFromY = event.y1 + Math.max(8, renderResult.height * 0.004);
+              if (onResumeSearch) {
+                onResumeSearch({
+                  pageNum,
+                  searchFromY,
+                  message: `Повторный поиск ключевых фраз ниже стоп-фразы (стр. ${pageNum}, Y ≥ ${Math.round(searchFromY)})`
+                });
+              }
             }
           }
 
