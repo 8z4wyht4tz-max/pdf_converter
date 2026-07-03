@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF-конвертер таблиц — OCR</title>
+  <style>
+    :root {
+      --bg: #f5f5f7;
+      --card: #ffffff;
+      --text: #161616;
+      --muted: #6b6b73;
+      --line: #e4e4e8;
+      --accent: #7b2cff;
+      --accent2: #a855f7;
+      --good: #16803a;
+      --warn: #a45b00;
+      --bad: #bb1d2c;
+      --shadow: 0 14px 40px rgba(0,0,0,.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 0%, rgba(123,44,255,.09), transparent 35%), var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap { width: min(1100px, calc(100% - 28px)); margin: 34px auto 60px; }
+    .hero { display: flex; gap: 18px; justify-content: space-between; align-items: flex-end; margin-bottom: 18px; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 5vw, 44px); line-height: 1.05; letter-spacing: -.04em; }
+    .subtitle { color: var(--muted); max-width: 760px; font-size: 15px; line-height: 1.5; }
+    .badge { white-space: nowrap; padding: 8px 11px; border-radius: 999px; background: rgba(123,44,255,.1); color: #6420d6; font-weight: 700; font-size: 12px; }
+    .grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 16px; }
+    .card { background: var(--card); border: 1px solid rgba(0,0,0,.05); border-radius: 20px; padding: 22px; box-shadow: var(--shadow); }
+    .card h2 { margin: 0 0 14px; font-size: 18px; }
+    .drop {
+      border: 2px dashed #cfcfd7; border-radius: 16px; min-height: 160px; display: grid; place-items: center;
+      padding: 24px; text-align: center; cursor: pointer; transition: .2s ease; background: #fafafd;
+    }
+    .drop:hover, .drop.drag { border-color: var(--accent); background: rgba(123,44,255,.04); transform: translateY(-1px); }
+    .drop strong { display: block; font-size: 16px; margin-bottom: 6px; }
+    .drop small { color: var(--muted); }
+    input[type=file] { display: none; }
+    .file-list { margin-top: 12px; display: grid; gap: 8px; }
+    .file-pill { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 12px; background: #f5f5f8; border-radius: 12px; font-size: 13px; }
+    .file-pill span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .file-pill b { color: var(--muted); font-weight: 600; white-space: nowrap; }
+    label.label { display: block; font-weight: 700; font-size: 13px; margin: 14px 0 7px; }
+    textarea, input[type=text], input[type=number], select {
+      width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; font: inherit; background: white; color: var(--text); outline: none;
+    }
+    textarea:focus, input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(123,44,255,.1); }
+    textarea { min-height: 92px; resize: vertical; }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    button {
+      border: 0; border-radius: 12px; padding: 12px 16px; font-weight: 800; cursor: pointer; font-size: 14px; transition: .18s ease;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: white; box-shadow: 0 9px 22px rgba(123,44,255,.25); }
+    .secondary { background: #eeeef3; color: #25252a; }
+    .danger { background: #fff0f1; color: var(--bad); }
+    .progress-box { margin-top: 16px; padding: 14px; border-radius: 14px; background: #f6f6f9; }
+    .progress-head { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; margin-bottom: 9px; }
+    .progress { height: 10px; background: #dedee5; border-radius: 999px; overflow: hidden; }
+    .bar { height: 100%; width: 0%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .25s ease; }
+    .status { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .phrase { padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #fafafd; font-size: 13px; line-height: 1.35; margin-bottom: 8px; }
+    .note { color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 10px; }
+    .results { margin-top: 16px; }
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .metric { border: 1px solid var(--line); border-radius: 14px; padding: 13px; background: #fbfbfd; }
+    .metric b { display: block; font-size: 24px; margin-top: 3px; }
+    .metric span { color: var(--muted); font-size: 11px; }
+    .log { margin-top: 14px; max-height: 260px; overflow: auto; background: #111116; color: #e8e8ed; border-radius: 14px; padding: 12px 14px; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+    .ok { color: var(--good); }
+    .warning { color: var(--warn); }
+    .error { color: var(--bad); }
+    footer { margin-top: 14px; color: var(--muted); font-size: 11px; text-align: center; }
+    @media (max-width: 800px) {
+      .hero { align-items: flex-start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      .summary { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <h1>PDF-конвертер таблиц</h1>
+        <div class="subtitle">Распознаёт сканированные PDF, находит заданные разделы и выгружает таблицы до следующей фразы «в штат».</div>
+      </div>
+      <div class="badge">Обработка локально в браузере</div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>1. Выберите PDF</h2>
+        <label class="drop" id="dropZone" for="fileInput">
+          <div>
+            <strong>Перетащите PDF сюда</strong>
+            <small>или нажмите, чтобы выбрать один или несколько файлов</small>
+          </div>
+        </label>
+        <input id="fileInput" type="file" accept="application/pdf,.pdf" multiple />
+        <div id="fileList" class="file-list"></div>
+
+        <div class="two">
+          <div>
+            <label class="label" for="scale">Качество OCR</label>
+            <select id="scale">
+              <option value="2">Быстро — 192 DPI</option>
+              <option value="2.5" selected>Оптимально — 240 DPI</option>
+              <option value="3">Точно — 288 DPI</option>
+            </select>
+          </div>
+          <div>
+            <label class="label" for="threshold">Порог совпадения</label>
+            <input id="threshold" type="number" min="55" max="95" value="72" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="startBtn" class="primary" disabled>Распознать и собрать Excel</button>
+          <button id="cancelBtn" class="danger" disabled>Остановить</button>
+          <button id="excelBtn" class="secondary" disabled>Скачать Excel</button>
+          <button id="zipBtn" class="secondary" disabled>Excel + фрагменты ZIP</button>
+        </div>
+
+        <div class="progress-box">
+          <div class="progress-head"><b id="progressTitle">Готов к работе</b><span id="progressPct">0%</span></div>
+          <div class="progress"><div class="bar" id="bar"></div></div>
+          <div class="status" id="status">При первом запуске загрузятся OCR-модуль и языковые данные rus+eng.</div>
+        </div>
+      </div>
+
+      <aside class="card">
+        <h2>2. Правила поиска</h2>
+        <label class="label" for="startPhrases">Начальные фразы — по одной на строку</label>
+        <textarea id="startPhrases">Управление клиентским сервисом поддержки РВБ
+Управление операционной эффективностью</textarea>
+        <label class="label" for="stopPhrase">Стоп-фраза</label>
+        <input id="stopPhrase" type="text" value="в штат" />
+
+        <label class="label">Что попадёт в результат</label>
+        <div class="phrase">Все распознанные табличные строки после одной из начальных фраз.</div>
+        <div class="phrase">Обработка продолжается на следующих страницах до первого совпадения со стоп-фразой.</div>
+        <div class="phrase">В ZIP дополнительно сохраняются изображения исходных фрагментов для проверки.</div>
+        <div class="note">Сложные объединённые ячейки, печати поверх текста и сильно перекошенные сканы могут потребовать ручной проверки.</div>
+      </aside>
+    </section>
+
+    <section class="card results">
+      <h2>Результат</h2>
+      <div class="summary">
+        <div class="metric"><span>Файлов обработано</span><b id="mFiles">0</b></div>
+        <div class="metric"><span>Страниц OCR</span><b id="mPages">0</b></div>
+        <div class="metric"><span>Найдено разделов</span><b id="mSections">0</b></div>
+        <div class="metric"><span>Извлечено таблиц</span><b id="mTables">0</b></div>
+      </div>
+      <div id="log" class="log">Журнал появится после запуска.</div>
+    </section>
+    <footer>PDF не отправляется на сервер. Для загрузки библиотек и OCR-языков при первом запуске требуется интернет.</footer>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script>
+    'use strict';
+
+    const $ = (id) => document.getElementById(id);
+    const state = {
+      files: [], cancelled: false, workbook: null, sections: [], images: [], logs: [],
+      metrics: { files: 0, pages: 0, sections: 0, tables: 0 }, outputBase: 'PDF_таблицы'
+    };
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+    const dropZone = $('dropZone');
+    const fileInput = $('fileInput');
+    const startBtn = $('startBtn');
+    const cancelBtn = $('cancelBtn');
+    const excelBtn = $('excelBtn');
+    const zipBtn = $('zipBtn');
+
+    fileInput.addEventListener('change', () => setFiles([...fileInput.files]));
+    ['dragenter','dragover'].forEach(evt => dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(evt => dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.remove('drag'); }));
+    dropZone.addEventListener('drop', e => setFiles([...e.dataTransfer.files].filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))));
+    startBtn.addEventListener('click', run);
+    cancelBtn.addEventListener('click', () => { state.cancelled = true; log('Запрошена остановка. Текущая страница будет завершена.', 'warning'); });
+    excelBtn.addEventListener('click', downloadExcel);
+    zipBtn.addEventListener('click', downloadZip);
+
+    function setFiles(files) {
+      state.files = files;
+      $('fileList').innerHTML = files.map(f => `<div class="file-pill"><span title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span><b>${formatBytes(f.size)}</b></div>`).join('');
+      startBtn.disabled = files.length === 0;
+      if (files.length) state.outputBase = sanitizeName(files.length === 1 ? files[0].name.replace(/\.pdf$/i,'') + '_таблицы' : 'PDF_таблицы_сводно');
+    }
+
+    function resetRun() {
+      state.cancelled = false; state.workbook = null; state.sections = []; state.images = []; state.logs = [];
+      state.metrics = { files: 0, pages: 0, sections: 0, tables: 0 };
+      $('log').textContent = '';
+      updateMetrics();
+      excelBtn.disabled = true; zipBtn.disabled = true;
+    }
+
+    async function run() {
+      if (!state.files.length) return;
+      const starts = $('startPhrases').value.split(/\n+/).map(s => s.trim()).filter(Boolean);
+      const stop = $('stopPhrase').value.trim();
+      const threshold = Math.max(.55, Math.min(.95, Number($('threshold').value || 72) / 100));
+      const scale = Number($('scale').value || 2.5);
+      if (!starts.length || !stop) { alert('Укажите начальные и стоп-фразу.'); return; }
+
+      resetRun(); setBusy(true); setProgress(1, 'Загрузка OCR', 'Подготавливаю русский и английский языки…');
+      let worker;
+      try {
+        worker = await Tesseract.createWorker(['rus','eng'], 1, {
+          logger: m => {
+            if (m.status && typeof m.progress === 'number') {
+              const p = Math.round(m.progress * 100);
+              $('status').textContent = `${translateStatus(m.status)}: ${p}%`;
+            }
+          }
+        });
+        await worker.setParameters({ preserve_interword_spaces: '1', tessedit_pageseg_mode: Tesseract.PSM.AUTO });
+        log('OCR-модуль rus+eng готов.', 'ok');
+
+        let totalPages = 0;
+        const docs = [];
+        for (const file of state.files) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+          docs.push({ file, doc }); totalPages += doc.numPages;
+        }
+
+        let donePages = 0;
+        for (let fi = 0; fi < docs.length; fi++) {
+          if (state.cancelled) break;
+          const { file, doc } = docs[fi];
+          log(`Файл: ${file.name} — ${doc.numPages} стр.`);
+          const fileResult = await processDocument(file, doc, worker, starts, stop, threshold, scale, () => {
+            donePages++;
+            const pct = 5 + Math.round((donePages / Math.max(totalPages,1)) * 88);
+            setProgress(pct, `OCR: ${file.name}`, `Обработано страниц: ${donePages} из ${totalPages}`);
+          });
+          state.sections.push(...fileResult.sections);
+          state.images.push(...fileResult.images);
+          state.metrics.files++;
+          updateMetrics();
+        }
+
+        if (state.cancelled) {
+          setProgress(100, 'Остановлено', 'Обработка остановлена пользователем. Уже найденные разделы можно выгрузить.');
+          log('Обработка остановлена.', 'warning');
+        } else {
+          setProgress(95, 'Формирование Excel', 'Собираю листы и журнал…');
+        }
+        buildWorkbook();
+        setProgress(100, state.cancelled ? 'Частичный результат готов' : 'Готово', `Найдено разделов: ${state.metrics.sections}; таблиц: ${state.metrics.tables}`);
+        excelBtn.disabled = !state.workbook;
+        zipBtn.disabled = !state.workbook;
+        if (!state.metrics.sections) log('Начальные фразы не найдены. Попробуйте снизить порог до 65–68% или повысить качество OCR.', 'warning');
+      } catch (err) {
+        console.error(err);
+        setProgress(100, 'Ошибка', err.message || String(err));
+        log(`Ошибка: ${err.message || err}`, 'error');
+        alert('Не удалось обработать PDF. Подробности находятся в журнале.');
+      } finally {
+        if (worker) { try { await worker.terminate(); } catch (_) {} }
+        setBusy(false);
+      }
+    }
+
+    async function processDocument(file, doc, worker, starts, stop, threshold, scale, pageDone) {
+      const sections = []; const images = []; let active = null; let sectionCounter = 0;
+      for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
+        if (state.cancelled) break;
+        const page = await doc.getPage(pageNum);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        $('progressTitle').textContent = `${file.name}: страница ${pageNum}/${doc.numPages}`;
+        const rec = await worker.recognize(canvas, {}, { text: true, blocks: true, tsv: true });
+        const words = getWords(rec.data).filter(w => w.text && w.conf > -1);
+        state.metrics.pages++; updateMetrics(); pageDone();
+
+        const startHits = [];
+        for (const phrase of starts) {
+          for (const hit of findPhraseMatches(words, phrase, threshold, 3)) startHits.push({ ...hit, kind:'start', phrase });
+        }
+        const stopHits = findPhraseMatches(words, stop, Math.max(.60, threshold - .08), 10).map(h => ({ ...h, kind:'stop', phrase: stop }));
+        const events = [...startHits, ...stopHits].sort((a,b) => a.y0 - b.y0 || (a.kind === 'stop' ? 1 : -1));
+
+        if (startHits.length) startHits.forEach(h => log(`Стр. ${pageNum}: начало «${h.phrase}» — ${Math.round(h.score*100)}%`));
+        if (stopHits.length) stopHits.forEach(h => log(`Стр. ${pageNum}: стоп «${stop}» — ${Math.round(h.score*100)}%`));
+
+        let cursorY = active ? 0 : null;
+        for (const event of events) {
+          if (!active && event.kind === 'start') {
+            sectionCounter++;
+            active = {
+              id: `${sanitizeName(file.name.replace(/\.pdf$/i,''))}_${sectionCounter}`,
+              fileName: file.name, title: event.phrase, startPage: pageNum, endPage: pageNum,
+              startScore: event.score, stopFound: false, segments: [], tables: [], ocrText: [], warnings: []
+            };
+            cursorY = Math.min(canvas.height, event.y1 + Math.max(8, canvas.height * .004));
+            continue;
+          }
+          if (active && event.kind === 'stop' && event.y0 >= (cursorY ?? 0)) {
+            if (event.y0 > (cursorY ?? 0) + 15) {
+              await addSegment(active, canvas, words, pageNum, cursorY ?? 0, event.y0, images);
+            }
+            active.endPage = pageNum; active.stopFound = true; active.stopScore = event.score;
+            finalizeSection(active, sections); active = null; cursorY = null;
+            continue;
+          }
+        }
+
+        if (active) {
+          const fromY = cursorY ?? 0;
+          if (canvas.height > fromY + 15) await addSegment(active, canvas, words, pageNum, fromY, canvas.height, images);
+          active.endPage = pageNum;
+        }
+        canvas.width = 1; canvas.height = 1;
+      }
+      if (active) {
+        active.warnings.push('Стоп-фраза не найдена: раздел завершён на последней странице PDF.');
+        finalizeSection(active, sections);
+      }
+      return { sections, images };
+    }
+
+    async function addSegment(section, pageCanvas, pageWords, pageNum, y0, y1, images) {
+      const top = Math.max(0, Math.floor(y0)); const bottom = Math.min(pageCanvas.height, Math.ceil(y1));
+      const height = bottom - top; if (height < 20) return;
+      const crop = document.createElement('canvas'); crop.width = pageCanvas.width; crop.height = height;
+      crop.getContext('2d').drawImage(pageCanvas, 0, top, pageCanvas.width, height, 0, 0, pageCanvas.width, height);
+      const dataUrl = crop.toDataURL('image/png');
+      const imageName = `${section.id}_стр_${pageNum}_${section.segments.length+1}.png`;
+      images.push({ name: imageName, dataUrl });
+
+      const words = pageWords.filter(w => centerY(w) >= top && centerY(w) < bottom).map(w => ({ ...w, y0: w.y0-top, y1: w.y1-top }));
+      const tables = extractTables(words, crop.width, crop.height, pageNum);
+      const text = rowsToText(groupRows(words));
+      section.ocrText.push({ page: pageNum, text });
+      section.segments.push({ page: pageNum, imageName, y0: top, y1: bottom, tablesCount: tables.length });
+      section.tables.push(...tables);
+      crop.width = 1; crop.height = 1;
+    }
+
+    function finalizeSection(section, sections) {
+      if (!section.tables.length) section.warnings.push('Табличная структура не распознана; сохранён OCR-текст и изображение фрагмента.');
+      sections.push(section);
+      state.metrics.sections++;
+      state.metrics.tables += section.tables.length;
+      updateMetrics();
+      log(`Раздел ${state.metrics.sections}: ${section.title}, стр. ${section.startPage}–${section.endPage}, таблиц: ${section.tables.length}`, section.stopFound ? 'ok' : 'warning');
+    }
+
+    function getWords(data) {
+      if (Array.isArray(data.words) && data.words.length) {
+        return data.words.map(w => ({
+          text: w.text || '', conf: Number(w.confidence ?? w.conf ?? 0),
+          x0: Number(w.bbox?.x0 ?? w.x0 ?? 0), y0: Number(w.bbox?.y0 ?? w.y0 ?? 0),
+          x1: Number(w.bbox?.x1 ?? w.x1 ?? 0), y1: Number(w.bbox?.y1 ?? w.y1 ?? 0)
+        }));
+      }
+      if (data.tsv) {
+        return data.tsv.split(/\r?\n/).slice(1).map(line => line.split('\t')).filter(c => c.length >= 12 && c[0] === '5').map(c => ({
+          text: c.slice(11).join('\t'), conf: Number(c[10]), x0:Number(c[6]), y0:Number(c[7]), x1:Number(c[6])+Number(c[8]), y1:Number(c[7])+Number(c[9])
+        }));
+      }
+      return [];
+    }
+
+    function findPhraseMatches(words, phrase, threshold, maxMatches=5) {
+      const prepared = words.map((w,i) => ({ ...w, i, n: normalizeWord(w.text) })).filter(w => w.n);
+      const targetTokens = normalizeText(phrase).split(' ').filter(Boolean);
+      const target = targetTokens.join(' '); if (!targetTokens.length || !prepared.length) return [];
+      const minLen = Math.max(1, targetTokens.length - 2); const maxLen = targetTokens.length + 4;
+      const candidates = [];
+      for (let i=0; i<prepared.length; i++) {
+        for (let len=minLen; len<=maxLen && i+len<=prepared.length; len++) {
+          const slice = prepared.slice(i,i+len);
+          const candidate = slice.map(x => x.n).join(' ');
+          const score = similarity(candidate, target);
+          if (score >= threshold) {
+            candidates.push({
+              score, from: slice[0].i, to: slice[slice.length-1].i,
+              y0: Math.min(...slice.map(x=>x.y0)), y1: Math.max(...slice.map(x=>x.y1)),
+              x0: Math.min(...slice.map(x=>x.x0)), x1: Math.max(...slice.map(x=>x.x1)),
+              recognized: slice.map(x=>x.text).join(' ')
+            });
+          }
+        }
+      }
+      candidates.sort((a,b)=>b.score-a.score);
+      const picked=[];
+      for (const c of candidates) {
+        if (picked.some(p => rangesOverlap(c.from,c.to,p.from,p.to) || Math.abs(c.y0-p.y0)<8)) continue;
+        picked.push(c); if (picked.length>=maxMatches) break;
+      }
+      return picked.sort((a,b)=>a.y0-b.y0);
+    }
+
+    function extractTables(words, width, height, pageNum) {
+      const rows = groupRows(words);
+      if (!rows.length) return [];
+      const rowHeights = rows.map(r => Math.max(...r.map(w=>w.y1)) - Math.min(...r.map(w=>w.y0))).filter(x=>x>0);
+      const medH = median(rowHeights) || 18;
+      const groups=[]; let current=[]; let prevBottom=null;
+      for (const row of rows) {
+        const top=Math.min(...row.map(w=>w.y0)); const bottom=Math.max(...row.map(w=>w.y1));
+        if (prevBottom !== null && top-prevBottom > medH*2.6 && current.length) { groups.push(current); current=[]; }
+        current.push(row); prevBottom=bottom;
+      }
+      if (current.length) groups.push(current);
+
+      const tables=[];
+      for (const group of groups) {
+        const structured = rowsToMatrix(group, width);
+        const nonEmpty = structured.matrix.filter(r => r.some(v => String(v||'').trim()));
+        const maxCols = Math.max(0, ...nonEmpty.map(r=>r.length));
+        const multiCellRows = nonEmpty.filter(r => r.filter(v=>String(v||'').trim()).length >= 2).length;
+        if (nonEmpty.length >= 2 && maxCols >= 2 && multiCellRows >= Math.min(2, nonEmpty.length)) {
+          tables.push({ page: pageNum, matrix: trimMatrix(nonEmpty), confidence: structured.confidence });
+        }
+      }
+      if (!tables.length && rows.length >= 2) {
+        const structured=rowsToMatrix(rows,width);
+        tables.push({ page:pageNum, matrix:trimMatrix(structured.matrix), confidence:Math.min(structured.confidence,.45), fallback:true });
+      }
+      return tables;
+    }
+
+    function groupRows(words) {
+      const sorted=[...words].filter(w=>w.text.trim()).sort((a,b)=>centerY(a)-centerY(b)||a.x0-b.x0);
+      const heights=sorted.map(w=>Math.max(1,w.y1-w.y0)); const tolerance=Math.max(7,(median(heights)||14)*.55);
+      const rows=[];
+      for (const word of sorted) {
+        const cy=centerY(word); let best=null; let bestDist=Infinity;
+        for (const row of rows) {
+          const d=Math.abs(cy-row.cy); if (d<tolerance && d<bestDist) {best=row;bestDist=d;}
+        }
+        if (!best) { best={cy,words:[]}; rows.push(best); }
+        best.words.push(word); best.cy=(best.cy*(best.words.length-1)+cy)/best.words.length;
+      }
+      return rows.sort((a,b)=>a.cy-b.cy).map(r=>r.words.sort((a,b)=>a.x0-b.x0));
+    }
+
+    function rowsToMatrix(rows, width) {
+      const cellsByRow=[]; const starts=[]; const widths=[];
+      for (const row of rows) {
+        const charWidths=row.map(w=>(w.x1-w.x0)/Math.max(1,w.text.length)).filter(Number.isFinite);
+        const baseChar=median(charWidths)||8; const cells=[]; let cell=null;
+        for (const w of row) {
+          const gap=cell ? w.x0-cell.x1 : Infinity;
+          const splitGap=Math.max(baseChar*2.6, width*.018);
+          if (!cell || gap>splitGap) {
+            cell={x0:w.x0,x1:w.x1,text:w.text}; cells.push(cell);
+          } else { cell.text += ' ' + w.text; cell.x1=w.x1; }
+        }
+        cellsByRow.push(cells); cells.forEach(c=>{starts.push(c.x0); widths.push(c.x1-c.x0);});
+      }
+      const anchorTolerance=Math.max(18,(median(widths)||60)*.28,width*.012);
+      const anchors=clusterNumbers(starts,anchorTolerance).sort((a,b)=>a-b);
+      const matrix=cellsByRow.map(cells=>{
+        const row=Array(Math.max(anchors.length,1)).fill('');
+        for (const c of cells) {
+          let idx=nearestIndex(anchors,c.x0); if (idx<0) idx=0;
+          row[idx]=row[idx] ? `${row[idx]} ${c.text}` : c.text;
+        }
+        return row;
+      });
+      const avgConf=wordsConfidence(rows.flat());
+      return {matrix,confidence:avgConf};
+    }
+
+    function buildWorkbook() {
+      const wb=XLSX.utils.book_new();
+      const summary=[['№','Файл','Раздел','Стартовая страница','Конечная страница','Стоп найден','Совпадение начала, %','Таблиц','Предупреждения']];
+      const ocrLog=[['Файл','Раздел','Страница','OCR-текст']];
+      state.sections.forEach((s,si)=>{
+        summary.push([si+1,s.fileName,s.title,s.startPage,s.endPage,s.stopFound?'Да':'Нет',Math.round((s.startScore||0)*100),s.tables.length,s.warnings.join('; ')]);
+        s.ocrText.forEach(t=>ocrLog.push([s.fileName,s.title,t.page,t.text]));
+      });
+      const wsSummary=XLSX.utils.aoa_to_sheet(summary); setCols(wsSummary,[6,32,48,18,18,14,22,10,55]); XLSX.utils.book_append_sheet(wb,wsSummary,'Сводка');
+
+      let globalTable=0;
+      state.sections.forEach((s,si)=>{
+        if (!s.tables.length) {
+          const rows=[[s.title],[`Файл: ${s.fileName}`],[`Страницы: ${s.startPage}–${s.endPage}`],[],['OCR-текст']];
+          s.ocrText.forEach(t=>{rows.push([`Страница ${t.page}`]); rows.push([t.text]); rows.push([]);});
+          const ws=XLSX.utils.aoa_to_sheet(rows); setCols(ws,[120]); XLSX.utils.book_append_sheet(wb,ws,uniqueSheetName(wb,`Раздел_${si+1}`));
+        }
+        s.tables.forEach((t,ti)=>{
+          globalTable++;
+          const rows=[
+            [s.title],
+            [`Файл: ${s.fileName}`],
+            [`Страница: ${t.page}`],
+            [`Качество структуры: ${Math.round((t.confidence||0)*100)}%${t.fallback?' — резервный режим':''}`],
+            [],
+            ...t.matrix
+          ];
+          const ws=XLSX.utils.aoa_to_sheet(rows); setCols(ws,autoColWidths(rows));
+          XLSX.utils.book_append_sheet(wb,ws,uniqueSheetName(wb,`Т${globalTable}_стр${t.page}`));
+        });
+      });
+      const wsOcr=XLSX.utils.aoa_to_sheet(ocrLog); setCols(wsOcr,[32,48,10,120]); XLSX.utils.book_append_sheet(wb,wsOcr,'OCR_журнал');
+      state.workbook=wb;
+    }
+
+    function downloadExcel() {
+      if (!state.workbook) return;
+      XLSX.writeFile(state.workbook, `${state.outputBase}.xlsx`, { compression:true });
+    }
+
+    async function downloadZip() {
+      if (!state.workbook) return;
+      const zip=new JSZip();
+      const xlsx=XLSX.write(state.workbook,{bookType:'xlsx',type:'array',compression:true});
+      zip.file(`${state.outputBase}.xlsx`,xlsx);
+      const folder=zip.folder('Фрагменты_скана');
+      state.images.forEach(img=>folder.file(img.name,img.dataUrl.split(',')[1],{base64:true}));
+      zip.file('README.txt',`PDF-конвертер таблиц\n\nExcel содержит распознанные таблицы, сводку и OCR-журнал.\nПапка «Фрагменты_скана» содержит исходные области PDF между начальной и стоп-фразой.\n\nРазделов: ${state.metrics.sections}\nТаблиц: ${state.metrics.tables}\n`);
+      const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'});
+      saveBlob(blob,`${state.outputBase}_с_фрагментами.zip`);
+    }
+
+    function normalizeText(text) { return String(text||'').toLowerCase().replace(/ё/g,'е').replace(/[abekmhopctxy]/g,ch=>({a:'а',b:'в',e:'е',k:'к',m:'м',h:'н',o:'о',p:'р',c:'с',t:'т',x:'х',y:'у'}[ch])).replace(/[^а-я0-9]+/gi,' ').replace(/\s+/g,' ').trim(); }
+    function normalizeWord(text) { return normalizeText(text).replace(/\s/g,''); }
+    function similarity(a,b) { if (a===b) return 1; const d=levenshtein(a,b); return 1-d/Math.max(a.length,b.length,1); }
+    function levenshtein(a,b) { const m=a.length,n=b.length; let prev=Array(n+1).fill(0).map((_,i)=>i),cur=Array(n+1); for(let i=1;i<=m;i++){cur[0]=i;for(let j=1;j<=n;j++)cur[j]=Math.min(cur[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));[prev,cur]=[cur,prev];}return prev[n]; }
+    function rangesOverlap(a0,a1,b0,b1){return Math.max(a0,b0)<=Math.min(a1,b1);}
+    function centerY(w){return (w.y0+w.y1)/2;}
+    function wordsConfidence(words){const c=words.map(w=>Number(w.conf)).filter(Number.isFinite).filter(v=>v>=0);return c.length?Math.max(0,Math.min(1,c.reduce((a,b)=>a+b,0)/c.length/100)):0;}
+    function median(arr){if(!arr.length)return 0;const a=[...arr].sort((x,y)=>x-y),m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;}
+    function clusterNumbers(nums,tol){const a=[...nums].filter(Number.isFinite).sort((x,y)=>x-y),clusters=[];for(const n of a){const last=clusters[clusters.length-1];if(!last||Math.abs(n-last.mean)>tol)clusters.push({values:[n],mean:n});else{last.values.push(n);last.mean=last.values.reduce((x,y)=>x+y,0)/last.values.length;}}return clusters.map(c=>c.mean);}
+    function nearestIndex(arr,value){if(!arr.length)return -1;let idx=0,d=Infinity;arr.forEach((v,i)=>{const nd=Math.abs(v-value);if(nd<d){d=nd;idx=i;}});return idx;}
+    function rowsToText(rows){return rows.map(r=>r.map(w=>w.text).join(' ')).join('\n');}
+    function trimMatrix(matrix){let m=matrix.map(r=>r.map(v=>String(v??'').trim()));while(m.length&&!m[0].some(Boolean))m.shift();while(m.length&&!m[m.length-1].some(Boolean))m.pop();let max=Math.max(0,...m.map(r=>r.length));while(max>0&&m.every(r=>!String(r[max-1]||'').trim()))max--;return m.map(r=>r.slice(0,max));}
+    function autoColWidths(rows){const max=Math.max(1,...rows.map(r=>r.length));return Array.from({length:max},(_,c)=>Math.min(55,Math.max(12,...rows.map(r=>String(r[c]??'').length+2))));}
+    function setCols(ws,widths){ws['!cols']=widths.map(w=>({wch:w}));}
+    function uniqueSheetName(wb,name){let base=sanitizeSheet(name).slice(0,31)||'Лист',n=base,i=2;while(wb.SheetNames.includes(n)){const suf=`_${i++}`;n=base.slice(0,31-suf.length)+suf;}return n;}
+    function sanitizeSheet(s){return String(s).replace(/[\\\/?*\[\]:]/g,'_');}
+    function sanitizeName(s){return String(s).replace(/[<>:"/\\|?*\u0000-\u001F]/g,'_').replace(/\s+/g,' ').trim().slice(0,100)||'PDF_таблицы';}
+    function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+    function formatBytes(b){if(!b)return'0 Б';const u=['Б','КБ','МБ','ГБ'];const i=Math.min(Math.floor(Math.log(b)/Math.log(1024)),u.length-1);return`${(b/1024**i).toFixed(i?1:0)} ${u[i]}`;}
+    function translateStatus(s){return ({'loading tesseract core':'Загрузка OCR-ядра','initializing tesseract':'Инициализация OCR','loading language traineddata':'Загрузка языков','initializing api':'Подготовка языка','recognizing text':'Распознавание текста'}[s]||s);}
+    function setBusy(b){startBtn.disabled=b||!state.files.length;cancelBtn.disabled=!b;fileInput.disabled=b;$('startPhrases').disabled=b;$('stopPhrase').disabled=b;$('scale').disabled=b;$('threshold').disabled=b;}
+    function setProgress(p,title,status){$('bar').style.width=`${Math.max(0,Math.min(100,p))}%`;$('progressPct').textContent=`${Math.round(p)}%`;$('progressTitle').textContent=title;$('status').textContent=status;}
+    function updateMetrics(){$('mFiles').textContent=state.metrics.files;$('mPages').textContent=state.metrics.pages;$('mSections').textContent=state.metrics.sections;$('mTables').textContent=state.metrics.tables;}
+    function log(message,type=''){const line=`[${new Date().toLocaleTimeString('ru-RU')}] ${message}`;state.logs.push(line);const el=document.createElement('div');if(type)el.className=type;el.textContent=line;$('log').appendChild(el);$('log').scrollTop=$('log').scrollHeight;}
+    function saveBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);}
+  </script>
+</body>
+</html>
